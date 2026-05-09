@@ -22,6 +22,9 @@ pub use caclient::*;
 pub mod manager;
 pub use manager::*;
 
+pub mod pcr_client;
+pub use pcr_client::{PcrCaClient, PcrConfig};
+
 mod auth;
 use crate::state::WorkloadInfo;
 pub use auth::*;

@@ -548,19 +548,44 @@ impl fmt::Debug for SecretManager {
 
 impl SecretManager {
     pub async fn new(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
-        let caclient = CaClient::new(
-            cfg.ca_address
-                .clone()
-                .expect("ca_address must be set to use CA"),
-            cfg.alt_ca_hostname.clone(),
-            cfg.ca_root_cert.clone(),
-            cfg.auth.clone(),
-            cfg.proxy_mode == ProxyMode::Shared,
-            cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),
-            cfg.ca_headers.vec.clone(),
-        )
-        .await?;
-        Ok(Self::new_with_client(caclient))
+        match cfg.ca_provider {
+            crate::config::CaProvider::PodCertificateRequest => {
+                let node_name = cfg.local_node.clone().ok_or_else(|| {
+                    Spiffe(
+                        "CA_PROVIDER=PodCertificateRequest requires NODE_NAME to be set"
+                            .to_string(),
+                    )
+                })?;
+                // Trust domain mirrors what istiod-issued certs use:
+                // configured via TRUST_DOMAIN env, falling back to the
+                // ztunnel default.
+                let trust_domain = std::env::var("TRUST_DOMAIN")
+                    .unwrap_or_else(|_| crate::identity::manager::DEFAULT_TRUST_DOMAIN.to_string());
+                let pcr_cfg = crate::identity::PcrConfig::in_cluster(
+                    node_name,
+                    cfg.pcr_signer_name.clone(),
+                    trust_domain,
+                    cfg.secret_ttl.as_secs().try_into().unwrap_or(86_400),
+                )?;
+                let client = crate::identity::PcrCaClient::new(pcr_cfg).await?;
+                Ok(Self::new_with_client(client))
+            }
+            crate::config::CaProvider::Istiod => {
+                let caclient = CaClient::new(
+                    cfg.ca_address
+                        .clone()
+                        .expect("ca_address must be set to use CA"),
+                    cfg.alt_ca_hostname.clone(),
+                    cfg.ca_root_cert.clone(),
+                    cfg.auth.clone(),
+                    cfg.proxy_mode == ProxyMode::Shared,
+                    cfg.secret_ttl.as_secs().try_into().unwrap_or(60 * 60 * 24),
+                    cfg.ca_headers.vec.clone(),
+                )
+                .await?;
+                Ok(Self::new_with_client(caclient))
+            }
+        }
     }
 
     pub fn new_with_client<C: 'static + CaClientTrait>(client: C) -> Self {

@@ -80,6 +80,21 @@ const UNSTABLE_ENABLE_SOCKS5: &str = "UNSTABLE_ENABLE_SOCKS5";
 
 const CRL_PATH: &str = "CRL_PATH";
 
+// CA_PROVIDER selects which CA backend to use for workload certificates.
+// Default is "istiod" (the existing Istio gRPC CA). Set to
+// "PodCertificateRequest" to mint certs via the Kubernetes
+// PodCertificateRequest API + constrained impersonation (KEP-4317 +
+// KEP-5284). Opt-in PoC; requires both feature gates on the apiserver.
+const CA_PROVIDER: &str = "CA_PROVIDER";
+const CA_PROVIDER_ISTIOD: &str = "istiod";
+const CA_PROVIDER_PCR: &str = "PodCertificateRequest";
+
+// PCR_SIGNER_NAME is the signer name addressed in created
+// PodCertificateRequest objects. Must match the istiod-side signer
+// controller's RBAC `sign` resourceName.
+const PCR_SIGNER_NAME: &str = "PCR_SIGNER_NAME";
+const DEFAULT_PCR_SIGNER_NAME: &str = "spiffe.istio.io/cluster.local";
+
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
@@ -147,6 +162,16 @@ impl ConfigSource {
             _ => "{}".to_string(),
         })
     }
+}
+
+#[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaProvider {
+    /// Use istiod's IstioCertificateService gRPC API (existing default).
+    #[default]
+    Istiod,
+    /// Use the Kubernetes PodCertificateRequest API (KEP-4317) with
+    /// constrained impersonation (KEP-5284). Opt-in.
+    PodCertificateRequest,
 }
 
 #[derive(serde::Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,6 +349,12 @@ pub struct Config {
     // path to CRL file; if set, enables CRL checking
     pub crl_path: Option<PathBuf>,
     pub enable_enhanced_baggage: bool,
+
+    /// Selects which CA backend mints workload certs.
+    pub ca_provider: CaProvider,
+    /// Signer name addressed in PodCertificateRequests when
+    /// `ca_provider == PodCertificateRequest`. Ignored otherwise.
+    pub pcr_signer_name: String,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -884,6 +915,21 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
         enable_enhanced_baggage: parse_default(ENABLE_ENHANCED_BAGGAGE, true)?,
+        ca_provider: match parse::<String>(CA_PROVIDER)? {
+            None => CaProvider::Istiod,
+            Some(s) if s.eq_ignore_ascii_case(CA_PROVIDER_ISTIOD) => CaProvider::Istiod,
+            Some(s) if s.eq_ignore_ascii_case(CA_PROVIDER_PCR) => CaProvider::PodCertificateRequest,
+            Some(other) => {
+                return Err(Error::EnvVar(
+                    CA_PROVIDER.to_string(),
+                    other,
+                    format!(
+                        "{CA_PROVIDER} must be one of {CA_PROVIDER_ISTIOD}, {CA_PROVIDER_PCR}"
+                    ),
+                ));
+            }
+        },
+        pcr_signer_name: parse_default(PCR_SIGNER_NAME, DEFAULT_PCR_SIGNER_NAME.to_string())?,
     })
 }
 

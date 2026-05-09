@@ -121,6 +121,78 @@ impl CsrOptions {
     }
 }
 
+/// Materials produced by [`generate_for_pcr`] for a single
+/// PodCertificateRequest. This is a richer form than [`CertSign`] that
+/// exposes the raw DER for `spec.stubPKCS10Request`, the
+/// PKIX-serialized public key for the legacy `spec.pkixPublicKey`, and
+/// a precomputed `spec.proofOfPossession` signature over
+/// `sha256(podUID)`.
+///
+/// Only available with the rcgen-backed feature flags. Other crypto
+/// backends (boring/openssl) currently fall back to an error in the
+/// PCR client.
+#[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
+pub struct PcrMaterials {
+    /// PEM-encoded PKCS#8 private key, ready to feed into
+    /// `tls::WorkloadCertificate::new`.
+    pub private_key_pem: Vec<u8>,
+    /// DER-encoded PKCS#10 CertificateSigningRequest.
+    pub csr_der: Vec<u8>,
+    /// PKIX-serialized SubjectPublicKeyInfo. Required by the v1beta1
+    /// `spec.pkixPublicKey` field on Kubernetes 1.35.
+    pub pkix_public_key_der: Vec<u8>,
+    /// Proof-of-possession signature: ECDSA-ASN.1 over `sha256(podUID)`.
+    pub proof_of_possession: Vec<u8>,
+}
+
+/// Generate the full set of materials a PCR client needs in one shot.
+///
+/// `pod_uid` is the requesting pod's UID; the proof-of-possession is
+/// computed over `sha256(pod_uid_bytes)` per KEP-4317.
+#[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
+pub fn generate_for_pcr(san: &str, pod_uid: &[u8]) -> Result<PcrMaterials, Error> {
+    use rcgen::{CertificateParams, DistinguishedName, PublicKeyData, SanType};
+    use ring::rand::SystemRandom;
+    use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+
+    // Generate one PKCS#8 P-256 key with `ring` and use it for both
+    // the rcgen CSR (via from_pkcs8_der_and_sign_algo) and the
+    // proof-of-possession signature, so that all three PCR fields
+    // reference the same public key.
+    let rng = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+        .map_err(|e| Error::CertificateParseError(format!("generate ECDSA P-256 key: {e}")))?;
+    let pkcs8_der = pkcs8.as_ref().to_vec();
+
+    let kp_pkcs8 = rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8_der.clone());
+    let kp = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
+        &kp_pkcs8,
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )?;
+    let pkix_public_key_der = kp.subject_public_key_info();
+    let private_key_pem = kp.serialize_pem().into_bytes();
+
+    let mut params = CertificateParams::default();
+    params.subject_alt_names = vec![SanType::URI(san.to_string().try_into()?)];
+    params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
+    params.distinguished_name = DistinguishedName::new();
+    let csr_der = params.serialize_request(&kp)?.der().to_vec();
+
+    let signing_kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &pkcs8_der, &rng)
+        .map_err(|e| Error::CertificateParseError(format!("load ECDSA key: {e}")))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, pod_uid);
+    let pop = signing_kp
+        .sign(&rng, digest.as_ref())
+        .map_err(|e| Error::CertificateParseError(format!("sign proof of possession: {e}")))?;
+
+    Ok(PcrMaterials {
+        private_key_pem,
+        csr_der,
+        pkix_public_key_der,
+        proof_of_possession: pop.as_ref().to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tls;
@@ -163,5 +235,27 @@ mod tests {
             &format!("{san:?}"),
             "SubjectAlternativeName { general_names: [URI(\"spiffe://td/ns/ns1/sa/sa1\")] }"
         )
+    }
+
+    #[cfg(any(feature = "tls-ring", feature = "tls-aws-lc"))]
+    #[test]
+    fn test_generate_for_pcr_produces_all_fields() {
+        let mats = tls::csr::generate_for_pcr("spiffe://td/ns/n/sa/s", b"podUID").unwrap();
+        assert!(!mats.csr_der.is_empty());
+        assert!(!mats.pkix_public_key_der.is_empty());
+        assert!(!mats.proof_of_possession.is_empty());
+        assert!(!mats.private_key_pem.is_empty());
+
+        // The CSR must parse and contain our SAN.
+        use x509_parser::prelude::*;
+        let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(
+            &mats.csr_der,
+        )
+        .unwrap();
+        csr.verify_signature().unwrap();
+
+        // The PKIX SPKI must parse as a valid SubjectPublicKeyInfo.
+        let (_, _spki) =
+            x509_parser::x509::SubjectPublicKeyInfo::from_der(&mats.pkix_public_key_der).unwrap();
     }
 }

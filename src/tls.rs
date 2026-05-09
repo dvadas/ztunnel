@@ -27,6 +27,11 @@ pub use crate::tls::certificate::*;
 pub use crate::tls::control::*;
 pub use crate::tls::lib::*;
 pub use crate::tls::workload::*;
+
+// Re-export the crypto provider constructor so that other in-crate modules
+// (e.g. the PodCertificateRequest CA client) can build their own rustls
+// ClientConfig with the same provider used elsewhere in ztunnel.
+pub(crate) use crate::tls::lib::provider as crypto_provider;
 use hyper::http::uri::InvalidUri;
 use rustls::server::VerifierBuilderError;
 
