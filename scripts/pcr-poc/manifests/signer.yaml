@@ -1,0 +1,94 @@
+# Standalone PCR-signer deployment for the ztunnel PoC.
+#
+# Trust model:
+#   * The signer runs in `pcr-signer` namespace as ServiceAccount
+#     `pcr-signer`. It needs `update` on `podcertificaterequests/status`
+#     and `sign` on the configured signer name.
+#   * Clients (here: the e2e test pod and, in production, ztunnel) need
+#     constrained-impersonation permissions to act as
+#     `system:node:<theirNode>` for the create + watch verbs on
+#     `podcertificaterequests`. See the e2e-rbac.yaml file.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pcr-signer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pcr-signer
+  namespace: pcr-signer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pcr-signer
+rules:
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["podcertificaterequests"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["podcertificaterequests/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["signers"]
+    resourceNames: ["spiffe.istio.io/cluster.local"]
+    verbs: ["sign"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pcr-signer
+subjects:
+  - kind: ServiceAccount
+    name: pcr-signer
+    namespace: pcr-signer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pcr-signer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pcr-signer
+  namespace: pcr-signer
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pcr-signer }
+  template:
+    metadata:
+      labels: { app: pcr-signer }
+    spec:
+      serviceAccountName: pcr-signer
+      containers:
+        - name: signer
+          image: localhost/ztunnel-pcr-signer:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --signer-name=spiffe.istio.io/cluster.local
+            - --trust-domain=cluster.local
+            - --cert-ttl=1h
+            - --refresh-frac=0.5
+            - --listen=:8080
+            - --ca-dir= # in-memory CA so the deployment is idempotent
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pcr-signer
+  namespace: pcr-signer
+spec:
+  selector: { app: pcr-signer }
+  ports:
+    - { name: http, port: 80, targetPort: http }

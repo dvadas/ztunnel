@@ -1,0 +1,179 @@
+# RBAC for the e2e test ServiceAccount.
+#
+# The test acts as a per-node agent that uses constrained impersonation
+# to create PodCertificateRequests as `system:node:<itsNode>`. The
+# noderestriction admission plugin enforces that the impersonated node
+# matches `pod.spec.nodeName`.
+#
+# Two distinct grants are needed (KEP-5284):
+#   1. impersonate:associated-node on `nodes` (cluster-scoped) -- says the
+#      caller may impersonate the node it is currently running on. This
+#      relies on the `authentication.kubernetes.io/node-name` extra on
+#      the bound SA token, which is added by KEP-4193. The
+#      apiserver compares this extra against the impersonated user.
+#   2. impersonate-on:associated-node:<verb> on the actual resource the
+#      caller wants to operate on (PodCertificateRequests).
+#
+# The test SA also needs to be able to GET the test pod's metadata (UID,
+# nodeName) and the SA's UID, since the PCR spec carries all of these.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pcr-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pcr-test-client
+  namespace: pcr-test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # The "workload" identity that the test PCR will be issued for.
+  name: app
+  namespace: pcr-test
+---
+# Allow the test client to act as `system:node:<itsNode>`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pcr-test-impersonate-associated-node
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["impersonate:associated-node"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pcr-test-impersonate-associated-node
+subjects:
+  - kind: ServiceAccount
+    name: pcr-test-client
+    namespace: pcr-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pcr-test-impersonate-associated-node
+---
+# Allow impersonate-on:associated-node:* for PCRs in the test namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pcr-test-impersonate-on-pcr
+  namespace: pcr-test
+rules:
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["podcertificaterequests"]
+    verbs:
+      - impersonate-on:associated-node:create
+      - impersonate-on:associated-node:get
+      - impersonate-on:associated-node:list
+      - impersonate-on:associated-node:watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pcr-test-impersonate-on-pcr
+  namespace: pcr-test
+subjects:
+  - kind: ServiceAccount
+    name: pcr-test-client
+    namespace: pcr-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pcr-test-impersonate-on-pcr
+---
+# The test client also needs to read its own pod metadata and the
+# target ServiceAccount/Node UIDs. These are *not* impersonated; they
+# go in via the test client's own SA token.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pcr-test-pod-sa-reader
+  namespace: pcr-test
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "serviceaccounts"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pcr-test-pod-sa-reader
+  namespace: pcr-test
+subjects:
+  - kind: ServiceAccount
+    name: pcr-test-client
+    namespace: pcr-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pcr-test-pod-sa-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pcr-test-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pcr-test-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: pcr-test-client
+    namespace: pcr-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pcr-test-node-reader
+---
+# A pod running as ServiceAccount `app` so noderestriction admission
+# accepts our PCR (the impersonated node = pod.spec.nodeName, and an
+# `app` pod must exist on that node in this namespace).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-target
+  namespace: pcr-test
+  labels: { app: app-target }
+spec:
+  serviceAccountName: app
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
+---
+# The test client pod. Its built-in projected SA token already carries
+# the `authentication.kubernetes.io/node-name` extra (KEP-4193) so we
+# can use it directly for `impersonate:associated-node` checks.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pcr-test-client
+  namespace: pcr-test
+spec:
+  serviceAccountName: pcr-test-client
+  restartPolicy: Never
+  containers:
+    - name: client
+      image: localhost/ztunnel-pcr-test-client:dev
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: NODE_NAME
+          valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+        - name: POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: SIGNER_NAME
+          value: spiffe.istio.io/cluster.local
+        - name: TARGET_SA
+          value: app
+        - name: TRUST_DOMAIN
+          value: cluster.local
