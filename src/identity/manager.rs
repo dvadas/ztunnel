@@ -550,12 +550,14 @@ impl SecretManager {
     pub async fn new(cfg: Arc<crate::config::Config>) -> Result<Self, Error> {
         match cfg.ca_provider {
             crate::config::CaProvider::PodCertificateRequest => {
-                let node_name = cfg.local_node.clone().ok_or_else(|| {
-                    Spiffe(
-                        "CA_PROVIDER=PodCertificateRequest requires NODE_NAME to be set"
-                            .to_string(),
-                    )
-                })?;
+                let node_name = cfg.pcr_node_name.clone()
+                    .or_else(|| cfg.local_node.clone())
+                    .ok_or_else(|| {
+                        Spiffe(
+                            "CA_PROVIDER=PodCertificateRequest requires PCR_NODE_NAME or NODE_NAME to be set"
+                                .to_string(),
+                        )
+                    })?;
                 // Trust domain mirrors what istiod-issued certs use:
                 // configured via TRUST_DOMAIN env, falling back to the
                 // ztunnel default.

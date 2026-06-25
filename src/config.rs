@@ -95,6 +95,13 @@ const CA_PROVIDER_PCR: &str = "PodCertificateRequest";
 const PCR_SIGNER_NAME: &str = "PCR_SIGNER_NAME";
 const DEFAULT_PCR_SIGNER_NAME: &str = "spiffe.istio.io/cluster.local";
 
+// PCR_NODE_NAME overrides NODE_NAME for the node identity used in constrained
+// impersonation when creating PodCertificateRequests. This is needed when
+// NODE_NAME is set to an IP address (e.g. by Cilium's Helm chart) but the
+// constrained impersonation authorizer expects the hostname. Falls back to
+// NODE_NAME if unset.
+const PCR_NODE_NAME: &str = "PCR_NODE_NAME";
+
 const DEFAULT_WORKER_THREADS: u16 = 2;
 const DEFAULT_ADMIN_PORT: u16 = 15000;
 const DEFAULT_READINESS_PORT: u16 = 15021;
@@ -355,6 +362,10 @@ pub struct Config {
     /// Signer name addressed in PodCertificateRequests when
     /// `ca_provider == PodCertificateRequest`. Ignored otherwise.
     pub pcr_signer_name: String,
+    /// Node name used for constrained impersonation in the PCR client.
+    /// Overrides `local_node` when set. Needed when `local_node` is an IP
+    /// but the impersonation authorizer expects a hostname.
+    pub pcr_node_name: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Copy, Debug)]
@@ -930,6 +941,7 @@ pub fn construct_config(pc: ProxyConfig) -> Result<Config, Error> {
             }
         },
         pcr_signer_name: parse_default(PCR_SIGNER_NAME, DEFAULT_PCR_SIGNER_NAME.to_string())?,
+        pcr_node_name: parse(PCR_NODE_NAME)?,
     })
 }
 
