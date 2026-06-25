@@ -180,9 +180,11 @@ pub fn generate_for_pcr(san: &str, pod_uid: &[u8]) -> Result<PcrMaterials, Error
 
     let signing_kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &pkcs8_der, &rng)
         .map_err(|e| Error::CertificateParseError(format!("load ECDSA key: {e}")))?;
-    let digest = ring::digest::digest(&ring::digest::SHA256, pod_uid);
+    // Sign the raw podUID bytes. ring's ECDSA_P256_SHA256_ASN1_SIGNING
+    // hashes the input with SHA-256 internally before signing, matching
+    // the apiserver's ecdsa.VerifyASN1(pub, sha256(podUID), sig).
     let pop = signing_kp
-        .sign(&rng, digest.as_ref())
+        .sign(&rng, pod_uid)
         .map_err(|e| Error::CertificateParseError(format!("sign proof of possession: {e}")))?;
 
     Ok(PcrMaterials {
