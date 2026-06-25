@@ -188,18 +188,22 @@ impl PcrCaClient {
         method: hyper::Method,
         path: &str,
         body: Option<Vec<u8>>,
+        impersonate: bool,
     ) -> Result<(http::StatusCode, bytes::Bytes), Error> {
         let token = self.read_token().await?;
         let url = format!("{}{}", self.cfg.apiserver_url, path);
         let body_bytes = body.unwrap_or_default();
         let body_full = Full::new(bytes::Bytes::from(body_bytes));
-        let req = Request::builder()
+        let mut builder = Request::builder()
             .method(method)
             .uri(&url)
             .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
             .header(hyper::header::ACCEPT, CONTENT_TYPE_JSON)
-            .header(hyper::header::CONTENT_TYPE, CONTENT_TYPE_JSON)
-            .header("Impersonate-User", self.impersonate_user())
+            .header(hyper::header::CONTENT_TYPE, CONTENT_TYPE_JSON);
+        if impersonate {
+            builder = builder.header("Impersonate-User", self.impersonate_user());
+        }
+        let req = builder
             .body(body_full)
             .map_err(|e| Error::Spiffe(format!("building kube request: {e}")))?;
         let resp = self
@@ -231,7 +235,7 @@ impl PcrCaClient {
             "/api/v1/namespaces/{ns}/pods?fieldSelector=spec.nodeName={}",
             urlencoding(&self.cfg.node_name)
         );
-        let (status, body) = self.do_request(hyper::Method::GET, &path, None).await?;
+        let (status, body) = self.do_request(hyper::Method::GET, &path, None, true).await?;
         if !status.is_success() {
             return Err(Error::Spiffe(format!(
                 "list pods on node {}: status {status}, body {}",
@@ -264,7 +268,7 @@ impl PcrCaClient {
 
     async fn get_sa_uid(&self, ns: &str, sa: &str) -> Result<String, Error> {
         let path = format!("/api/v1/namespaces/{ns}/serviceaccounts/{sa}");
-        let (status, body) = self.do_request(hyper::Method::GET, &path, None).await?;
+        let (status, body) = self.do_request(hyper::Method::GET, &path, None, true).await?;
         if !status.is_success() {
             return Err(Error::Spiffe(format!(
                 "get sa {ns}/{sa}: status {status}, body {}",
@@ -280,7 +284,7 @@ impl PcrCaClient {
 
     async fn get_node_uid(&self, node: &str) -> Result<String, Error> {
         let path = format!("/api/v1/nodes/{node}");
-        let (status, body) = self.do_request(hyper::Method::GET, &path, None).await?;
+        let (status, body) = self.do_request(hyper::Method::GET, &path, None, true).await?;
         if !status.is_success() {
             return Err(Error::Spiffe(format!(
                 "get node {node}: status {status}, body {}",
@@ -299,7 +303,7 @@ impl PcrCaClient {
         let path = format!("{PCR_API_PREFIX}/namespaces/{ns}/podcertificaterequests");
         let buf = serde_json::to_vec(body)
             .map_err(|e| Error::Spiffe(format!("serialising PCR: {e}")))?;
-        let (status, resp_body) = self.do_request(hyper::Method::POST, &path, Some(buf)).await?;
+        let (status, resp_body) = self.do_request(hyper::Method::POST, &path, Some(buf), true).await?;
         if !status.is_success() {
             return Err(Error::Spiffe(format!(
                 "create PCR ns={ns}: status {status}, body {}",
@@ -318,7 +322,7 @@ impl PcrCaClient {
         let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
         let path = format!("{PCR_API_PREFIX}/namespaces/{ns}/podcertificaterequests/{name}");
         loop {
-            let (status, body) = self.do_request(hyper::Method::GET, &path, None).await?;
+            let (status, body) = self.do_request(hyper::Method::GET, &path, None, false).await?;
             if !status.is_success() {
                 return Err(Error::Spiffe(format!(
                     "get PCR {ns}/{name}: status {status}, body {}",
